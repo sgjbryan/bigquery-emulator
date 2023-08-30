@@ -411,6 +411,10 @@ func (s *storageWriteServer) createWriteStream(ctx context.Context, req *storage
 		commitTime = createTime
 	}
 	schema := types.TableToProto(tableMetadata)
+	location := tableMetadata.Location
+	if location == "" {
+		location = "eu"
+	}
 	stream := &storagepb.WriteStream{
 		Name:        streamName,
 		Type:        streamType,
@@ -418,7 +422,7 @@ func (s *storageWriteServer) createWriteStream(ctx context.Context, req *storage
 		CommitTime:  commitTime,
 		TableSchema: schema,
 		WriteMode:   storagepb.WriteStream_INSERT,
-		Location:    "eu", //TODO: this should probably be tableMetadata.Location, but that is likely not set
+		Location:    location,
 	}
 
 	if rLocked {
