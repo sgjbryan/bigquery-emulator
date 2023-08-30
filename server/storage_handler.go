@@ -384,6 +384,17 @@ type writeStreamStatus struct {
 }
 
 func (s *storageWriteServer) CreateWriteStream(ctx context.Context, req *storagepb.CreateWriteStreamRequest) (*storagepb.WriteStream, error) {
+	streamID := randomID()
+	streamName := fmt.Sprintf("%s/streams/%s", req.Parent, streamID)
+	req.GetWriteStream().Name = streamName
+	stream, err := s.createWriteStream(ctx, req, false)
+	if err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (s *storageWriteServer) createWriteStream(ctx context.Context, req *storagepb.CreateWriteStreamRequest, rLocked bool) (*storagepb.WriteStream, error) {
 	projectID, datasetID, tableID, err := getIDsFromPath(req.Parent)
 	if err != nil {
 		return nil, err
@@ -392,8 +403,7 @@ func (s *storageWriteServer) CreateWriteStream(ctx context.Context, req *storage
 	if err != nil {
 		return nil, fmt.Errorf("failed to get table metadata: %w", err)
 	}
-	streamID := randomID()
-	streamName := fmt.Sprintf("%s/streams/%s", req.Parent, streamID)
+	streamName := req.GetWriteStream().GetName()
 	createTime := timestamppb.New(time.Now())
 	streamType := req.GetWriteStream().GetType()
 	var commitTime *timestamppb.Timestamp
@@ -408,8 +418,13 @@ func (s *storageWriteServer) CreateWriteStream(ctx context.Context, req *storage
 		CommitTime:  commitTime,
 		TableSchema: schema,
 		WriteMode:   storagepb.WriteStream_INSERT,
+		Location:    "eu", //TODO: this should probably be tableMetadata.Location, but that is likely not set
 	}
 
+	if rLocked {
+		s.mu.RUnlock()
+		defer s.mu.RLock()
+	}
 	s.mu.Lock()
 	s.streamMap[streamName] = &writeStreamStatus{
 		streamType:    streamType,
@@ -468,6 +483,23 @@ func (s *storageWriteServer) getMessageDescriptor(req *storagepb.AppendRowsReque
 	return fd.Messages().ByName(protoreflect.Name(descProto.GetName())), nil
 }
 
+func (s *storageWriteServer) getStream(streamName string) (*writeStreamStatus, bool) {
+	stream, exists := s.streamMap[streamName]
+	if !exists && strings.HasSuffix(streamName, "/streams/_default") {
+		ctx := context.Background()
+		ctx = logger.WithLogger(ctx, s.server.logger)
+		s.createWriteStream(ctx, &storagepb.CreateWriteStreamRequest{
+			Parent: strings.ReplaceAll(streamName, "/streams/_default", ""),
+			WriteStream: &storagepb.WriteStream{
+				Name: streamName,
+				Type: storagepb.WriteStream_COMMITTED,
+			},
+		}, true)
+		stream, exists = s.streamMap[streamName]
+	}
+	return stream, exists
+}
+
 func (s *storageWriteServer) appendRows(req *storagepb.AppendRowsRequest, msgDesc protoreflect.MessageDescriptor, stream storagepb.BigQueryWrite_AppendRowsServer) error {
 	streamName := req.GetWriteStream()
 	s.mu.RLock()
@@ -478,7 +510,7 @@ func (s *storageWriteServer) appendRows(req *storagepb.AppendRowsRequest, msgDes
 			break
 		}
 	} else {
-		s, exists := s.streamMap[streamName]
+		s, exists := s.getStream(streamName)
 		if !exists {
 			return fmt.Errorf("failed to get stream from %s", streamName)
 		}
@@ -682,7 +714,7 @@ func (s *storageWriteServer) insertTableData(ctx context.Context, tx *connection
 func (s *storageWriteServer) GetWriteStream(ctx context.Context, req *storagepb.GetWriteStreamRequest) (*storagepb.WriteStream, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	status, exists := s.streamMap[req.Name]
+	status, exists := s.getStream(req.Name)
 	if !exists {
 		return nil, fmt.Errorf("failed to find stream from %s", req.Name)
 	}
