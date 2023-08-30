@@ -488,7 +488,6 @@ func (s *storageWriteServer) appendRows(req *storagepb.AppendRowsRequest, msgDes
 	if status.finalized {
 		return fmt.Errorf("stream is already finalized")
 	}
-	offset := req.GetOffset().Value
 	rows := req.GetProtoRows().GetRows().GetSerializedRows()
 	data, err := s.decodeData(msgDesc, rows)
 	if err != nil {
@@ -521,15 +520,23 @@ func (s *storageWriteServer) appendRows(req *storagepb.AppendRowsRequest, msgDes
 	} else {
 		status.rows = append(status.rows, data...)
 	}
-	return s.sendResult(stream, streamName, offset+int64(len(rows)))
+
+	//If offset is not provided in request it should not be present in response
+	var newOffset *wrapperspb.Int64Value
+	providedOffset := req.GetOffset()
+	if providedOffset != nil {
+		offset := providedOffset.Value
+		newOffset = wrapperspb.Int64(offset + int64(len(rows)))
+	}
+	return s.sendResult(stream, streamName, newOffset)
 }
 
-func (s *storageWriteServer) sendResult(stream storagepb.BigQueryWrite_AppendRowsServer, streamName string, offset int64) error {
+func (s *storageWriteServer) sendResult(stream storagepb.BigQueryWrite_AppendRowsServer, streamName string, offset *wrapperspb.Int64Value) error {
 	return stream.Send(&storagepb.AppendRowsResponse{
 		WriteStream: streamName,
 		Response: &storagepb.AppendRowsResponse_AppendResult_{
 			AppendResult: &storagepb.AppendRowsResponse_AppendResult{
-				Offset: wrapperspb.Int64(offset),
+				Offset: offset,
 			},
 		},
 	})
